@@ -1,0 +1,78 @@
+bundle:
+  name: databricks-job-failure-healing
+
+artifacts:
+  default:
+    type: whl
+    path: .
+    build: python -m pip wheel . --no-deps --wheel-dir dist
+
+variables:
+  workspace_id:
+    description: Workspace ID used to scope Databricks Lakeflow system tables
+  system_run_table:
+    default: system.lakeflow.job_run_timeline
+    description: Databricks system table used to discover failed job runs
+  system_task_run_table:
+    default: system.lakeflow.job_task_run_timeline
+    description: Databricks system table used to identify failed task runs
+  incident_table:
+    default: molina-new.teamsint.job_healing_incidents
+    description: Idempotent incident state and review-packet table
+  lookback_days:
+    default: "7"
+    description: Only inspect completed failed runs within this many days
+  max_runs_per_run:
+    default: "100"
+    description: Upper bound on failed runs queried per scheduled run
+  llm_enabled:
+    default: "true"
+    description: Use Databricks ai_query for diagnosis, with deterministic fallback
+  llm_model:
+    default: databricks-meta-llama-3-3-70b-instruct
+    description: Databricks-hosted model endpoint used by ai_query
+  schedule_pause_status:
+    default: PAUSED
+    description: Keep PAUSED until permissions and dry-run results are reviewed
+
+resources:
+  jobs:
+    job_failure_self_healing:
+      name: job-failure-self-healing-${bundle.target}
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      schedule:
+        quartz_cron_expression: "0 */15 * * * ?"
+        timezone_id: UTC
+        pause_status: ${var.schedule_pause_status}
+      job_clusters:
+        - job_cluster_key: healing_cluster
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: Standard_DS3_v2
+            num_workers: 1
+            data_security_mode: SINGLE_USER
+      tasks:
+        - task_key: discover_classify_and_propose
+          job_cluster_key: healing_cluster
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/01_system_failure_triage.py
+            source: WORKSPACE
+            base_parameters:
+              workspace_id: ${var.workspace_id}
+              system_run_table: ${var.system_run_table}
+              system_task_run_table: ${var.system_task_run_table}
+              incident_table: ${var.incident_table}
+              lookback_days: ${var.lookback_days}
+              max_runs_per_run: ${var.max_runs_per_run}
+              llm_enabled: ${var.llm_enabled}
+              llm_model: ${var.llm_model}
+          libraries:
+            - whl: ./dist/*.whl
+            - pypi:
+                package: databricks-sdk>=0.49.0
+
+targets:
+  dev:
+    mode: development
+    default: true
